@@ -3,7 +3,7 @@
 BT1 Power can be supplied by either of these.
 Nine Volt Power Adapter, adafruit PID 63.
 Nine Volt Battery Case, adafruit PID 67.
-# J2 PS2 Keyboard connector adafruit pid 804.
+J2 PS2 Keyboard connector adafruit pid 804.
 J3 RCA connector, for keying input.
 LS1 Speaker, adafruit pid 1890.
 S2 Momentary push button switch for reset.
