@@ -20,4 +20,5 @@ letter via the keyboard and the display will show the results (right vs. wrong +
 9:-  PS2 keyboard.
 10:- Keyer and paddle. A straight key can be used.
 </pre>
-![Circuit-Diagram-01](https://user-images.githubusercontent.com/107634952/174108463-97eb0316-4859-4143-b07b-186a12647979.png)
+
+![Circuit-Diagaram-001](https://user-images.githubusercontent.com/106174790/175063364-ced09d17-ec7f-4a0a-b1aa-5ab7842960a4.PNG)
