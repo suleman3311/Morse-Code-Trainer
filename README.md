@@ -1,6 +1,6 @@
 # Morse-Code-Trainer
 
-BT1 Power can be supplied by either of these.
+BT1 Power can be supplied by either of these.a__
 Nine Volt Power Adapter, adafruit PID 63.
 Nine Volt Battery Case, adafruit PID 67.
 J2 PS2 Keyboard connector adafruit pid 804.
