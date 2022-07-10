@@ -1,26 +1,3 @@
-/****************************************
-  Arduino Morse code Trainer by Tom Lewis, N4TL.   February 21, 2016
-  This sketch sends a few random Morse code characters, then waits for the student to send them back with an external keyer.
-  If the same characters are sent back the sketch sends new random characters. If they are wrong the sketch sends the same characters over.
-  The PS2 keyboard allows the user to change some operational parameters.
-  See the CW Trainer article.docx file for more information.
-  73 N4TL
-
-  Uses code by Glen Popiel, KW5GP, found in his book, Arduino for Ham Radio, published by the ARRL.
-  Modified and added LCD display by Glen Popiel - KW5GP
-
-  Uses MORSE ENDECODER Library by raronzen
-  Copyright (C) 2010, 2012 raron GNU GPLv3 license (http://www.gnu.org/licenses)
-  Contact: raronzen@gmail.com  (not checked too often..)
-  Details: http://raronoff.wordpress.com/2010/12/16/morse-endecoder/
-
-  Uses the library for the Adafruit RGB 16x2 LCD Shield by Limor Fried/Ladyada
-  for Adafruit Industries http://www.adafruit.com/products/714. BSD license.
-
-  Oct. 2016 - Modified to replace PS-2 keyboard functions with LCD menus and buttons
-  by Mike Hughes, KC1DMR. Latest source at https://github.com/mfhughes128/cw-trainer
-*****************************************/
-
 #include <avr/pgmspace.h>
 #include <EEPROM.h>
 #include <Adafruit_RGBLCDShield.h>
