@@ -22,3 +22,11 @@ letter via the keyboard and the display will show the results (right vs. wrong +
 </pre>
 
 ![Circuit-Diagaram-001](https://user-images.githubusercontent.com/106174790/175063364-ced09d17-ec7f-4a0a-b1aa-5ab7842960a4.PNG)
+
+
+
+//Temproray links for the LCD stuff 
+// please remove then after usage
+
+Library folder link according to the model fon the lcd :- https://github.com/watterott/Arduino-Libs/tree/master/MI0283QT2
+Usage Example of the library for the hints and conf stuff :- https://forum.arduino.cc/t/programme-fur-das-touch-display-mi0283qt-2-von-watterott/60234
