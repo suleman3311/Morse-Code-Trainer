@@ -1,22 +1,25 @@
+/*
+  Paint Demonstration
+ */
 #include <avr/pgmspace.h>
 #include <EEPROM.h>
-#include <Adafruit_RGBLCDShield.h>
-#include <utility/Adafruit_MCP23017.h>
 #include <MorseEnDecoder.h>  // Morse EnDecoder Library
 
-// These #defines make it easy to set the LCD backlight color
-#define RED 0x1
-#define YELLOW 0x3
-#define GREEN 0x2
-#define TEAL 0x6
-#define BLUE 0x4
-#define VIOLET 0x5
-#define WHITE 0x7
-#define LCD_DISPLAYON 0x04
-#define LCD_DISPLAYOFF 0x00
+//#include <EEPROM.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <digitalWriteFast.h>
+#include <GraphicsLib.h>
+#include <MI0283QT2.h>
+#include <MI0283QT9.h>
+#include <DisplaySPI.h>
+#include <DisplayI2C.h>
+#include <PS2Keyboard.h>
 
-Adafruit_RGBLCDShield lcd = Adafruit_RGBLCDShield();  // LCD class
-char line_buf[17];
+//Declare only one display !
+ MI0283QT2 lcd;  //MI0283QT2 Adapter v1
+ // declare keyboard!
+PS2Keyboard keyboard;
 
 // Application preferences global
 //  Char set values:
@@ -40,463 +43,767 @@ char line_buf[17];
 byte prefs[NUM_PREFS];  // Table of preference values
 
 //=========================================
-// There is a document at the ARRL that tells how to measure CW speed by sending PARIS. 
-// The length of time it takes to send PARIS in seconds divided in to 60 gives the speed in WPM
-// with the Key_speed_adj = -2, 
-// and the characters delay = 0, the measured output speed is
-// 20 wpm measured to be 19.9 wpm
-// 25 wpm measured to be 25.3 wpm
-// 30 wpm measured to be 30.8 wpm
-//
-// and the characters delay = 10, the measured output speed is
-// 20 wpm measured to be 17.7 wpm
-// 25 wpm measured to be 21.6 wpm
-// 30 wpm measured to be 25.6 wpm
-//
-// and the characters delay = 20, the measured output speed is
-// 20 wpm measured to be 15.7 wpm
-// 25 wpm measured to be 18.9 wpm
-// 30 wpm measured to be 21.9 wpm
-//=========================================
 int Key_speed_adj = -2; // correction for keying speed
 
 // IO definitions
 const byte morseInPin = 2; // Pin for key or tone input
-const byte beep_pin = 11;  // Pin for speaker
+const byte beep_pin = 10;  // Pin for speaker
 const byte key_pin = 12;   // Pin for CW digital output
+int unit_delay = 250;
+const int DataPin = 2; //Data pin for the Keyboard
+const int IRQpin =  3;
 
+char randomWord = '/';
 
-//====================
-// Setup Function
-//====================
 void setup()
 {
- 
-  // Start serial debug port
+  delay(1000);
+  keyboard.begin(DataPin, IRQpin);
   Serial.begin(9600);
-  while(!Serial);
-  Serial.println("N4TL CW Trainer");
+  
+  //init display
+  lcd.begin(7); //spi-clk=SPI_CLOCK_DIV4
+  lcd.begin(0x20); //I2C Displays: addr=0x20
 
-  // Start LCD
-  lcd.begin(16, 2);
-  lcd.setBacklight(WHITE);
+  //set touchpanel calibration data
+  lcd.touchRead();
+  if(lcd.touchZ())  // || readCalData()) //calibration data in EEPROM?
+  {
+    lcd.touchStartCal(); //calibrate touchpanel
+//    writeCalData(); //write data to EEPROM
+  }
 
-  // Initialize application preferences
+  //clear screen
+  lcd.fillScreen(RGB(255,255,255));
+
+  //show backlight power and cal text
+  lcd.led(50); //backlight 0...100%
+  lcd.drawText(2, 2, "BL    ", RGB(255,0,0), RGB(255,255,255), 1);
+  lcd.drawInteger(20, 2, 50, DEC, RGB(255,0,0), RGB(255,255,255), 1);
+  lcd.drawText(lcd.getWidth()-30, 2, "CAL", RGB(255,0,0), RGB(255,255,255), 1);
+
+   // Initialize application preferences
   prefs_init();
+  
+}
 
-}  // end setup()
 
-
-//====================
-// Main Loop Function
-//====================
 void loop()
 {
-  byte op_mode;
+  char tmp[128];
+  static uint16_t last_x=0, last_y=0;
+  static uint8_t led=60;
+  unsigned long m;
+  static unsigned long prevMillis=0;
 
-  // Run the main menu
-  op_mode = get_mode();
+  //service routine for touch panel
+  lcd.touchRead();
+  if(lcd.touchZ()) //touch press?
+  {
+    //change backlight power
+    if((lcd.touchX() < 45) && (lcd.touchY() < 15))
+    {
+      m = millis();
+      if((m - prevMillis) > 800) //change only every 800ms
+      {
+        prevMillis = m;
 
-  // Dispatch the selected operation
-  switch (op_mode) {
-    case 1:
-      morse_trainer();
-      break;
-    case 2:
-      morse_decode();
-      break;
-    case 3:
-      set_prefs();
-      break;
-    case 4:
-      paris_test();
-      break;
-  }  //end dispatch switch  
-}  // end loop()
-
-
-//====================
-// Operating Mode Menu Function
-//====================
-byte get_mode()
-{
-  // Main menu strings
-  const static char msg0[] PROGMEM = "N4TL CW Trainer ";
-  const static char msg1[] PROGMEM = ">Start Trainer  ";
-  const static char msg2[] PROGMEM = ">Start Decoder  ";
-  const static char msg3[] PROGMEM = ">Set Preferences";
-  const static char msg4[] PROGMEM = ">Run PARIS Test ";
-  const static char* const main_menu[] PROGMEM = {msg0, msg1, msg2, msg3, msg4};
-  const byte n_entry = 4;  // number of menu options
-
-  byte entry = 1;  // current menu option
-  byte buttons = 0;
-  boolean done = false;
-
-  // Clear the LCD and display menu heading
-  lcd.clear();
-  lcd.setCursor(0,0);
-  strcpy_P(line_buf, (char*)pgm_read_word(&(main_menu[0])));
-  lcd.print(line_buf);
-  
-  do {
-    // display this menu option on 2nd line
-    lcd.setCursor(0, 1);
-    strcpy_P(line_buf, (char*)pgm_read_word(&(main_menu[entry])));
-    lcd.print(line_buf);
-    delay(250);  // short delay for readability
-
-    // wait for a button press then handle it.
-    while(!(buttons = lcd.readButtons()));  // wait for button press
-    if (buttons & BUTTON_UP) --entry;
-    if (buttons & BUTTON_DOWN) ++entry;
-    entry = constrain(entry, 1, n_entry);
-    if (buttons & BUTTON_SELECT) {
-      while(lcd.readButtons());  // wait for button release
-      done = true; 
-    }
-  } while(!done);
-  
-  return entry;
-}  // end get_mode()
-
-
-//====================
-// Set Preferences menu Function
-//====================
-void set_prefs()
-{
-  // Prefs menu strings
-  const static char prf0[] PROGMEM = "Saving to EEPROM";
-  const static char prf1[] PROGMEM = "Code Group Size:";
-  const static char prf2[] PROGMEM = "Character Delay:";
-  const static char prf3[] PROGMEM = "Code Speed:     ";
-  const static char prf4[] PROGMEM = "Character Set:  ";
-  const static char prf5[] PROGMEM = "Koch Number:    ";
-  const static char prf6[] PROGMEM = "Skip Characters:";
-  const static char prf7[] PROGMEM = "Out: 0=key,1=spk";
-  const static char* const prefs_menu[] PROGMEM = {prf0, prf1, prf2, prf3, prf4, prf5,prf6,prf7};
-
-  byte pref = 1;  // current pref
-  int p_val;
-  int tmp;
-  byte buttons = 0;
-  boolean next = false;
-  boolean done = false;
-
-  // Clear the display
-  lcd.clear();
-  Serial.println("Set preferences");
-
-  // Loop displaying preference values and let user change them
-  do {
-    // Display the selected preference
-    lcd.setCursor(0,0);
-    strcpy_P(line_buf, (char*)pgm_read_word(&(prefs_menu[pref])));
-    lcd.print(line_buf);
-    p_val = prefs[pref];
-
-    do {
-      // Display the pref current value and wait for button press
-      lcd.setCursor(0,1);
-      lcd.print(" = ");
-      lcd.print(p_val);
-      lcd.print("          ");
-      delay(250);
-      while(!(buttons = lcd.readButtons()));
-
-      // Handle button press in priority order
-      if (buttons & BUTTON_SELECT) {
-        next = true;
-        done = true;
-      } else if (buttons & BUTTON_UP) {
-        tmp = --pref;
-        pref = constrain(tmp, 1, NUM_PREFS-1);
-        next = true;
-      } else if (buttons & BUTTON_DOWN) {
-        tmp = ++pref;
-        pref = constrain(tmp, 1, NUM_PREFS-1);
-        next = true;
-      } else if (buttons & BUTTON_RIGHT) {
-        tmp = ++p_val;
-        p_val = prefs_set(pref, tmp);
-      } else if (buttons & BUTTON_LEFT) {
-        tmp = --p_val;
-        p_val = prefs_set(pref, tmp);
+        led += 10;
+        if(led > 100)
+        {
+          led = 10;
+        }
+        lcd.led(led);
+        lcd.drawText(2, 2, "BL    ", RGB(255,0,0), RGB(255,255,255), 1);
+        lcd.drawInteger(20, 2, led, DEC, RGB(255,0,0), RGB(255,255,255), 1);
+        lcd.drawText(lcd.getWidth()-30, 2, "CAL", RGB(255,0,0), RGB(255,255,255), 1);
       }
-      
-    }while(!next);  // end of values loop    
-    next = false;  // Reset next prefs flag.
-  } while(!done);  // end of prefs loop
+    }
 
-  // Signal user select button was detected
-  lcd.clear();
-  strcpy_P(line_buf, (char*)pgm_read_word(&(prefs_menu[SAVED_FLG])));
-  lcd.setCursor(0,0);
-  lcd.print(line_buf);
-  delay(500);
-  
-  // Save all prefs to EEPROM before returning.
-  prefs_set(SAVED_FLG, 170);  // Set prefs saved flag
-  for (int i=0; i<NUM_PREFS; i++) {
-    EEPROM.write(i, prefs[i]);
+    //calibrate touch panel
+    else if((lcd.touchX() > (lcd.getWidth()-30)) && (lcd.touchY() < 15))
+    {
+      lcd.touchStartCal();
+//      writeCalData();
+      lcd.drawText(2, 2, "BL    ", RGB(255,0,0), RGB(255,255,255), 1);
+      lcd.drawInteger(20, 2, led, DEC, RGB(255,0,0), RGB(255,255,255), 1);
+      lcd.drawText(lcd.getWidth()-30, 2, "CAL", RGB(255,0,0), RGB(255,255,255), 1);
+    }
+
+    //draw line
+    else if((last_x != lcd.touchX()) || (last_y != lcd.touchY()))
+    {
+      sprintf(tmp, "X:%03i Y:%03i P:%03i", lcd.touchX(), lcd.touchY(), lcd.touchZ());
+      lcd.drawText(50, 2, tmp, RGB(0,0,0), RGB(255,255,255), 1);
+
+      if(last_x == 0)
+      {
+        lcd.drawPixel(lcd.touchX(), lcd.touchY(), RGB(0,0,0));
+      }
+      else
+      {
+        lcd.drawLine(last_x, last_y, lcd.touchX(), lcd.touchY(), RGB(0,0,0));
+      }
+      last_x = lcd.touchX();
+      last_y = lcd.touchY();
+    }
   }
+  else
+  {
+    last_x = 0;
+  }
+ morse_trainer();
   
-  // wait for button release
-  while(lcd.readButtons());
-
-}  // end set_prefs()
+}
 
 
 //====================
 // Morse code trainer function
 //====================
 void morse_trainer()
-{
-  
-  //Character sets
-  const static char koch[] PROGMEM = {'K','M','R','S','U','A','P','T','L','O','W','I','.','N','J','E','F',
-  '0','Y','V',',','G','5','/','Q','9','Z','H','3','8','B','?','4','2','7','C','1','D','6','X','\0'};
-  const static char alpha[] PROGMEM = {'0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F','G',
+{ 
+  const static char wordsToMorse[] = {'0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F','G',
   'H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z',',','.','/','?','\0'};
-  const static char* const char_sets[] PROGMEM = {alpha, koch};
-  char ch_buf[41];  // Buffer for character set
-  byte cset, lo, hi; // Specify set of characters to send
-
-  char cw_tx[17];   // Buffer for test string
-  char cw_rx;       // Received character
-  byte rx_cnt = 0;  // Count of received characters
-
-  // Miscelaneous loop parameters
-  byte i,j;
-  boolean error = false;
-  byte buttons;
-
-  // Morse sender parameters
-  byte _speed = prefs[KEY_SPEED] + Key_speed_adj;  // Current speed setting in WPM
-  
-
-  // Init ===========================================================
-  Serial.println("Morse trainer started");
-  randomSeed(micros()); // random seed = microseconds since start.
-
-  // Setup Speaker for decoder sidetone and encoder output
-  MorseSpeaker Mspkr(beep_pin);
+  if(randomWord == '/'){
+   randomWord = wordsToMorse[random(41)];
+  Serial.print(randomWord);
+     String stringinValue = "sound of random char  "+ String(randomWord);
+  lcd.drawText((lcd.getWidth()/4), (lcd.getHeight()/2),stringinValue , RGB(255,0,0), RGB(255,255,255), 1);
+  generate_morse_sound(randomWord);
+  }
+   if (keyboard.available()) {
     
-  // Setup Morse receiver
-  MorseDecoder morseInput(morseInPin, MORSE_KEYER, MORSE_ACTIVE_LOW, &Mspkr);
-  Mspkr.sideToneOn = true;
-  morseInput.setspeed(_speed);
-  
-  // Setup Morse sender
-  MorseEncoder morse(key_pin, &Mspkr);
-  switch (prefs[OUT_MODE]) {
-    case 0:  // Digital (key) output
-      Mspkr.outputToneOn = false;
-      break;
-    case 1:  // Analog (beep) output
-      Mspkr.outputToneOn = true;
-      break;
-  }
-  morse.setspeed(_speed);
-  
-  // Setup character set
-  // Note: The high limit on random() is exclusive, so 'hi' is the table index + 1 
-  switch (prefs[CHAR_SET]) {
-    case 1:  // alpha characters
-      cset = 0;
-      lo = 10;
-      hi = 36;
-      break;
-    case 2:  // numbers
-      cset = 0;
-      lo = 0;
-      hi = 10;
-      break;
-    case 3:  // punctuation
-      cset = 0;
-      lo = 36;
-      hi = 40;
-      break;
-    case 4:  // all alphabetic
-      cset = 0;
-      lo = 0;
-      hi = 40;
-      break;
-    case 5:  // Koch order
-      cset = 1;
-      lo = prefs[KOCH_SKIP];
-      hi = prefs[KOCH_NUM];
-      break;
-    case 6:  // Koch order (same as 5 for now)
-      cset = 1;
-      lo = prefs[KOCH_SKIP];
-      hi = prefs[KOCH_NUM];
-      break;
-  }
-  strcpy_P(ch_buf, (char*)pgm_read_word(&(char_sets[cset])));    // Copy the chosen character set to working buffer
-
-  // Start training loop =======================================================
-  do {
-    Serial.print("\nTop of the send loop  ");
-    lcd.clear();
-
-    // Send characters to trainee
-    for (i = 0; i < (prefs[GROUP_NUM]); i++)
-    {
-      if (!error) {  // if no error on last round, generate new text.
-        j = random(lo, hi);
-        cw_tx[i] = ch_buf[j];
-      }
-
-      if (prefs[GROUP_DLY] > 0) {  //Wait out delay between characters
-        delay(prefs[GROUP_DLY] * 10);
-      }
-      lcd.print(cw_tx[i]);  // Display the sent char
-      morse.write(cw_tx[i]);   // Send the character
-      do {
-        morse.encode();
-      } while (!morse.available());  // Encoder is idle?
-      Serial.print(cw_tx[i]); // debug print
-    }
-
-    // Now check the trainee's sending
-    Serial.print("\nTop of the check loop ");
-    error = false;
-    rx_cnt = 0;
-    lcd.setCursor(0, 1); // Set the cursor to bottom line, left
-    do {
-      morseInput.decode();  // Start decoder and check char when it comes in
-      if (morseInput.available()) {
-        char cw_rx = morseInput.read();
-        if (cw_rx != ' ') {  // Skip spaces
-          lcd.print(cw_rx);
-          Serial.print(cw_rx);
-          if (cw_rx != cw_tx[rx_cnt]) error = true;
-          ++rx_cnt;
-        }
-      }
-      if (buttons = lcd.readButtons()) break;
-    } while (rx_cnt < prefs[GROUP_NUM] && !error);
-
-    // Set backlignt according to trainee's performance
-    if (error) {
-      lcd.setBacklight(RED);
+    // read the next key
+    char c = keyboard.read();
+    // check for some of the special keys
+    if (c == PS2_ENTER) {
+      Serial.println();
+    } else if (c == PS2_TAB) {
+      Serial.print("[Tab]");
+    } else if (c == PS2_ESC) {
+      Serial.print("[ESC]");
+    } else if (c == PS2_PAGEDOWN) {
+      Serial.print("[PgDn]");
+    } else if (c == PS2_PAGEUP) {
+      Serial.print("[PgUp]");
+    } else if (c == PS2_LEFTARROW) {
+      Serial.print("[Left]");
+    } else if (c == PS2_RIGHTARROW) {
+      Serial.print("[Right]");
+    } else if (c == PS2_UPARROW) {
+      Serial.print("[Up]");
+    } else if (c == PS2_DOWNARROW) {
+      Serial.print("[Down]");
+    } else if (c == PS2_DELETE) {
+      Serial.print("[Del]");
     } else {
-      lcd.setBacklight(WHITE);      
+      if(c == randomWord){
+        Serial.print(randomWord);
+        Serial.print("==");
+      Serial.print(c);
+        lcd.drawText((lcd.getWidth()/4), (lcd.getHeight()/2), "congratulations               ", RGB(255,0,0), RGB(255,255,255), 1);
+        randomWord = '/';
+      }
+      else {
+        Serial.print(randomWord);
+        Serial.print("!=");
+        Serial.print(c);
+        lcd.drawText((lcd.getWidth()/4), (lcd.getHeight()/2), "Bad luck                     ", RGB(255,0,0), RGB(255,255,255), 1);
+        randomWord = '/';
+      }
+      // otherwise, just print all normal characters
     }
-
-    delay(100);  //0.1 sec pause at the end of the loop.
-
-  } while(!(buttons));
-
-  //TODO Decode and handle buttons
-  //    select = exit
-  //    up/dn = chg code speed (sets error so same string repeats)
-  //    left/right = chg group size
-
-  while(lcd.readButtons());  // wait for button release
+  }
+    delay(3000);  //0.1 sec pause at the end of the loop.
 
 }  // end morse_trainer()
 
 
-//=====================================
-// CW decoder only, use this section to check your keyers output to this decoder.
-//=====================================
-void morse_decode()
+// different Tone for everyword method
+void dot()
 {
-  char cw_rx;
-  byte button;
-  byte ch_cnt = 0;
-  byte _speed = prefs[KEY_SPEED] + Key_speed_adj;  // Current speed setting in WPM
-
-  // Setup Speaker for decoder sidetone and encoder output
-  MorseSpeaker Mspkr(beep_pin);
-  Mspkr.sideToneOn = true;
-  
-  // Setup Morse receiver
-  MorseDecoder morseInput(morseInPin, MORSE_KEYER, MORSE_ACTIVE_LOW, &Mspkr);
-  morseInput.setspeed(_speed);
-
-  Serial.println("Morse decoder started");
-  lcd.clear();
-  lcd.setCursor(0, 1);
-  lcd.leftToRight();
-
-  do {
-    morseInput.decode();  // Decode incoming CW
-    if (morseInput.available()) {  // If there is a character available
-      cw_rx = morseInput.read();  // Read the CW character
-      if (ch_cnt == 16) {
-        lcd.setCursor(0,1);
-        lcd.print("                ");
-        lcd.setCursor(0,1);
-        Serial.print('\n');
-        ch_cnt = 0;
-      }
-      Serial.print(cw_rx); // send character to the debug serial monitor
-      lcd.print(cw_rx);  // Display the CW character
-      ++ch_cnt;
-    }
-  } while (!(button = lcd.readButtons()));
-
-  while (lcd.readButtons());
-}  // end of morse_decode()
-
-
-//=====================================
-// "PARIS" test routine
-//=====================================
-void paris_test()
+Serial.print(".");
+tone(beep_pin, 1000);
+delay(unit_delay);
+tone(beep_pin, 400);
+delay(unit_delay);
+noTone(beep_pin);
+}
+void dash()
 {
-  char cw_tx[]= "PARIS";
+Serial.print("-");
+tone(beep_pin, 1000);
+delay(unit_delay * 3);
+tone(beep_pin, 400);
+delay(unit_delay);
+noTone(beep_pin);
+}
+void A()
+{
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void B()
+{
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void C()
+{
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void D()
+{
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void E()
+{
+dot();
+delay(unit_delay);
+}
+void f()
+{
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void G()
+{
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void H()
+{
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void I()
+{
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void J()
+{
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void K()
+{
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void L()
+{
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void M()
+{
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void N()
+{
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void O()
+{
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void P()
+{
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dot();
+}
+void Q()
+{
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void R()
+{
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void S()
+{
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void T()
+{
+dash();
+delay(unit_delay);
+}
+void U()
+{
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void V()
+{
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void W()
+{
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void X()
+{
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void Y()
+{
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void Z()
+{
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void one()
+{
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void two()
+{
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void three()
+{
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void four()
+{
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
+void five()
+{
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void six()
+{
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void seven()
+{
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void eight()
+{
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void nine()
+{
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dot();
+delay(unit_delay);
+}
+void zero()
+{
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+dash();
+delay(unit_delay);
+}
 
-  // Morse sender parameters
-  byte _speed = prefs[KEY_SPEED] + Key_speed_adj;  // Current speed setting in WPM
 
-  boolean done = false;
-  
-  // Setup Speaker for decoder sidetone and encoder output
-  MorseSpeaker Mspkr(beep_pin);
 
-  // Setup Morse sender
-  MorseEncoder morse(key_pin, &Mspkr);
-  switch (prefs[OUT_MODE]) {
-    case 0:  // Digital (key) output
-      Mspkr.outputToneOn = false;
-      break;
-    case 1:  // Analog (beep) output
-      Mspkr.outputToneOn = true;
-      break;
-  }
-  morse.setspeed(_speed);
+// Morse sounds
+void generate_morse_sound(char ch)
+{
+if (ch == 'A' || ch == 'a')
+{
+A();
+Serial.print(" ");
+}
+else if (ch == 'B' || ch == 'b')
+{
+B();
+Serial.print(" ");
+}
+else if (ch == 'C' || ch == 'c')
+{
+C();
+Serial.print(" ");
+}
+else if (ch == 'D' || ch == 'd')
+{
+D();
+Serial.print(" ");
+}
+else if (ch == 'E' || ch == 'e')
+{
+E();
+Serial.print(" ");
+}
+else if (ch == 'f' || ch == 'f')
+{
+f();
+Serial.print(" ");
+}
+else if (ch == 'G' || ch == 'g')
+{
+G();
+Serial.print(" ");
+}
+else if (ch == 'H' || ch == 'h')
+{
+H();
+Serial.print(" ");
+}
+else if (ch == 'I' || ch == 'i')
+{
+I();
+Serial.print(" ");
+}
+else if (ch == 'J' || ch == 'j')
+{
+J();
+Serial.print(" ");
+}
+else if (ch == 'K' || ch == 'k')
+{
+K();
+Serial.print(" ");
+}
+else if (ch == 'L' || ch == 'l')
+{
+L();
+Serial.print(" ");
+}
+else if (ch == 'M' || ch == 'm')
+{
+M();
+Serial.print(" ");
+}
+else if (ch == 'N' || ch == 'n')
+{
+N();
+Serial.print(" ");
+}
+else if (ch == 'O' || ch == 'o')
+{
+O();
+Serial.print(" ");
+}
+else if (ch == 'P' || ch == 'p')
+{
+P();
+Serial.print(" ");
+}
+else if (ch == 'Q' || ch == 'q')
+{
+Q();
+Serial.print(" ");
+}
+else if (ch == 'R' || ch == 'r')
+{
+R();
+Serial.print(" ");
+}
+else if (ch == 'S' || ch == 's')
+{
+S();
+Serial.print(" ");
+}
+else if (ch == 'T' || ch == 't')
+{
+T();
+Serial.print(" ");
+}
+else if (ch == 'U' || ch == 'u')
+{
+U();
+Serial.print(" ");
+}
+else if (ch == 'V' || ch == 'v')
+{
+V();
+Serial.print(" ");
+}
+else if (ch == 'W' || ch == 'w')
+{
+W();
+Serial.print(" ");
+}
+else if (ch == 'X' || ch == 'x')
+{
+X();
+Serial.print(" ");
+}
+else if (ch == 'Y' || ch == 'y')
+{
+Y();
+Serial.print(" ");
+}
+else if (ch == 'Z' || ch == 'z')
+{
+Z();
+Serial.print(" ");
+}
+else if (ch == '0')
+{
+zero();
+Serial.print(" ");
+}
+else if (ch == '1')
+{
+one();
+Serial.print(" ");
+}
+else if (ch == '2')
+{
+two();
+Serial.print(" ");
+}
+else if (ch == '3')
+{
+three();
+Serial.print(" ");
+}
+else if (ch == '4')
+{
+four();
+Serial.print(" ");
+}
+else if (ch == '5')
+{
+five();
+Serial.print(" ");
+}
+else if (ch == '6')
+{
+six();
+Serial.print(" ");
+}
+else if (ch == '7')
+{
+seven();
+Serial.print(" ");
+}
+else if (ch == '8')
+{
+eight();
+Serial.print(" ");
+}
+else if (ch == '9')
+{
+nine();
+Serial.print(" ");
+}
+else if(ch == ' ')
+{
+delay(unit_delay*7);
+Serial.print("/ ");
+}
+else
+Serial.println("Unknown symbol!");
+}
 
-  // Loop sending until a button is pressed
-  do
-  {
-    Serial.print("\nTop of the send loop  ");
-    lcd.clear();
-    delay(1000);  // one second between each paris
-    
-    // Send characters 
-    for (int i = 0; i < 5; i++)
-    {
-      if (lcd.readButtons()) done = true;  // if button down, this is last loop
-      if (prefs[GROUP_DLY] > 0) {  //Wait out delay between characters
-        delay(prefs[GROUP_DLY] * 10);
-      }
-      lcd.print(cw_tx[i]);  // Display the sent char
-      morse.write(cw_tx[i]);   // Send the character
-      do {
-        morse.encode();
-      } while (!morse.available());  // Encoder idle?
-
-      Serial.print(cw_tx[i]); // debug print
-    }
-  } while (!done);
-
-  while (lcd.readButtons());  //wait for button to be released
-}  // end of paris_test()
 
 
 //===========================
@@ -527,7 +834,6 @@ void prefs_init()
     prefs_set(OUT_MODE, 1);   // Output to speaker
   }
 }
-
 
 //========================
 // Set preference specified in arg1 to value in arg2
